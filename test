@@ -1,0 +1,162 @@
+using System;
+using System.Threading;
+using System.Runtime.InteropServices;
+using System.Drawing;
+using System.Diagnostics;
+ 
+namespace MCV
+{
+    public class Bot
+    {
+        [DllImport("USER32.dll")]
+        static extern ushort GetKeyState(int nVirtKey);
+ 
+        EMem m;
+ 
+        IntPtr hpjmp, hookfunc, hookangle, aimspread, aimkick;
+        IntPtr exebase;
+        IntPtr dllbase;
+ 
+        byte[] newfunc = new byte[] { 0x8B, 0x94, 0x24, 0xB8, 0x00, 0x00, 0x00, 0x89, 0x0C, 0x95, 0x00, 0x00, 0x00, 0x00, 0x8B, 0x5C, 0x24, 0xD4, 0x89, 0x1C, 0x95, 0x00, 0x00, 0x00, 0x00, 0x8B, 0x5C, 0x24, 0xD8, 0x89, 0x1C, 0x95, 0x00, 0x00, 0x00, 0x00, 0x8B, 0x5C, 0x24, 0xDC, 0x89, 0x1C, 0x95, 0x00, 0x00, 0x00, 0x00, 0x8B, 0xD9, 0xC3 };
+        byte[] anglehook = new byte[] { 0x89, 0x1D, 0x00, 0x00, 0x00 ,0x00, 0xC3 };
+ 
+        public void Core()
+        {
+            m = new EMem();
+            Console.WriteLine("Waiting for process...");
+ 
+            while(true)
+            {               
+                if (m.OpenProcess("ModernCombatVersus"))
+                    break;
+            }
+ 
+            Console.WriteLine("Initialzing...");
+ 
+            exebase = m.GetModuleBase("ModernCombatVersus.exe");
+            dllbase = m.GetModuleBase("NativeEngine.dll");
+ 
+ 
+            //55 8b ec 80 b9 ?? 00 00 00 00 75 09
+            m.SetProtection(exebase + 0x200, 0x1000, EMem.MemoryProtection.PAGE_EXECUTE_READWRITE);
+ 
+            hookfunc = m.AOBSearch(new byte[] { 0x55, 0x8b, 0xec, 0x80, 0xb9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x75, 0x09 }, new byte[] { 5 });
+            hpjmp = m.AOBSearch(new byte[] { 0x85, 0xc0, 0x74, 0x21, 0x8b, 0xcb });
+            hookangle = m.AOBSearch(new byte[] { 0x8b, 0xce, 0x8b, 0x95, 0xac, 0xfe, 0xff, 0xff }); // 8b ce 8b 95 ac fe ff ff
+            aimkick = m.AOBSearch(new byte[] { 0x8b, 0xd0, 0x8b, 0x46, 0x54 }); // 0d
+            aimspread = m.AOBSearch(new byte[] { 0x89, 0x45, 0xe0, 0x8d, 0x45, 0xe0, 0xff, 0x30, 0x8d, 0x45, 0xec });//0f
+ 
+            if ((int)hookfunc == 0 || (int)hpjmp == 0 || (int)hookangle == 0 || (int)aimspread == 0 || (int)aimkick == 0)
+            {
+                Console.WriteLine("Aob search failed.");
+ 
+                if (Console.ReadLine() != "y")
+                    return;
+            }
+ 
+            Console.WriteLine("Patching game...");
+ 
+            m.Suspend();
+ 
+            //ESP
+            m.WriteBytes(hpjmp + 0x2, new byte[] { 0x90, 0x90 }); //je
+ 
+            //NTT HOOK
+            m.WriteBytes(hookfunc, newfunc);
+            m.Write<int>(hookfunc + 0x0a, (int)exebase + 0x300);
+            m.Write<int>(hookfunc + 0x15, (int)exebase + 0x400);
+            m.Write<int>(hookfunc + 0x20, (int)exebase + 0x500);
+            m.Write<int>(hookfunc + 0x2b, (int)exebase + 0x600);
+            
+            //ANGLE HOOK
+            m.WriteBytes(hookangle + 0x17, anglehook); //89 1D 00 07 B3 00 C3
+            m.Write<int>(hookangle + 0x19, (int)exebase + 0x700);
+ 
+            //AIM KICK PATCH
+            m.Write<byte>(aimkick + 0xc, 0xEB);
+ 
+            //AIM SPREAD PATCH
+            m.WriteBytes(aimspread + 0xf, new byte[] { 0x83, 0xc4, 0x08, 0x90, 0x90, 0x90 });
+ 
+            m.Resume();
+ 
+            // myangle : ecx + 0x26c Y
+            //           ecx + 0x274 X
+ 
+            Console.WriteLine("Done!");
+ 
+            while (true)
+            {
+                float mindist = 1000000;
+                float[] angle = new float[] { -1, -1 };
+ 
+ 
+                var myx = m.Read<float>(dllbase + 0xE81C1C);
+                var myy = m.Read<float>(dllbase + 0xE81C20);
+                var myz = m.Read<float>(dllbase + 0xE81C24);
+ 
+                var myangle = m.Read<int>((IntPtr)(m.Read<int>(exebase + 0x700) + 0xc));
+ 
+                //for (int i = 0; i < 7; i++)
+                //m.Write<int>(exebase + 0x300 + i * 0x4, 0);
+                
+                for (int i = 0; i < 7; i++)
+                {
+                    var nttclass = m.Read<int>(exebase + 0x300 + i * 0x4);
+ 
+                    if (nttclass == 0)
+                        continue;
+ 
+                    var ntt_x = m.Read<float>(exebase + 0x400 + i * 0x4);
+                    var ntt_y = m.Read<float>(exebase + 0x500 + i * 0x4);
+                    var ntt_z = m.Read<float>(exebase + 0x600 + i * 0x4);
+                    var isvisible = m.Read<byte>(new IntPtr(nttclass + 0xd0));
+                    var isteam = m.Read<byte>(new IntPtr(nttclass + 0xba));
+ 
+                    if (isvisible != 1)
+                        continue;
+ 
+                    if (isteam != 0)
+                        continue;
+ 
+                    var distance = (float)(Math.Sqrt((ntt_x - myx) * (ntt_x - myx) + (ntt_y - myy) * (ntt_y - myy) + (ntt_z - myz) * (ntt_z - myz)));
+ 
+                    //Console.WriteLine(string.Format("{0} : ({1}, {2}, {3})", nttclass.ToString("x16"), ntt_x.ToString("F1"), ntt_y.ToString("F1"), ntt_z.ToString("F1")));
+                    //ui.txtbox.Text += 
+ 
+                    var tmpangle = (float)Math.Atan2((myx - ntt_x), (myz - ntt_z));
+ 
+                    var aimdistance = tmpangle - (m.Read<float>((IntPtr)myangle + 0x274) % 6.283f);
+ 
+                    if (aimdistance < (float)(-Math.PI))
+                    {
+                        aimdistance = aimdistance + (float)(2 * Math.PI);
+                    }
+                    if (aimdistance > (float)(Math.PI))
+                    {
+                        aimdistance = aimdistance - (float)(2 * Math.PI);
+                    }
+ 
+                    if (aimdistance < 0)
+                        aimdistance *= -1;
+ 
+                    if (mindist > aimdistance)
+                    {
+                        mindist = aimdistance;
+                        angle[0] = tmpangle;
+                        angle[1] = (float)(Math.Asin((ntt_y - myy) / distance));
+                    }
+                    //Console.WriteLine(string.Format("({0} {1} {2}) vis : {3} team : {4}", ntt_x.ToString("F0"), ntt_y.ToString("F0"), ntt_z.ToString("F0"), isvisible, isteam));
+                }
+ 
+                if ((angle[0] != -1) && (GetKeyState(0x02) > 1))
+                {
+                    m.Write<float>((IntPtr)myangle + 0x274, angle[0]);
+                    m.Write<float>((IntPtr)myangle + 0x26c, angle[1]);
+                }
+            }
+        }
+ 
+     
+    }
+}
